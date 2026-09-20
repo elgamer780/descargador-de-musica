@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Descargador de Música — versión 1.0.0 beta.
+"""Descargador de Música — versión 1.0.2.
 
 Aplicación independiente (no complemento de NVDA), accesible con NVDA.
 Busca canciones en YouTube, acepta URL (canción o playlist), reproduce
@@ -9,6 +9,7 @@ y carpeta. Incorpora yt-dlp y ffmpeg dentro del mismo .exe.
 """
 
 import ctypes
+import io
 import json
 import os
 import re
@@ -23,8 +24,11 @@ import urllib.request
 import wx
 
 APP_NAME = "Descargador de Música"
-VERSION = "1.0.0 beta"
+VERSION = "1.0.2"
 SEARCH_LIMIT = 10
+REPO_USER = "elgamer780"
+REPO_NAME = "descargador-de-musica"
+PROGRAMA_ASSET = "Descargador-de-Musica.exe"
 
 FORMATOS = [
     ("m4a", "M4A"),
@@ -219,6 +223,62 @@ def actualizar_externo():
                 os.remove(temporal)
             except Exception:
                 pass
+
+
+def _version_numerica(v):
+    v = re.sub(r"[^\d.]+", "", str(v))
+    try:
+        return tuple(int(p) for p in v.split(".") if p != "")
+    except Exception:
+        return (0,)
+
+
+def descargar_actualizacion_programa(silencioso=True):
+    """Busca una versión nueva del Descargador en GitHub y, si la hay,
+    descarga el nuevo .exe al lado del actual (archivo .NUEVO).
+    Devuelve el texto de la versión nueva (p. ej. '1.0.2') si se descargó,
+    None si no hay novedades, o un mensaje de error si algo falló.
+    Con silencioso=True los problemas de conexión se tratan como sin
+    novedades (None) para no molestar en el arranque."""
+    if not getattr(sys, "frozen", False):
+        return None if silencioso else (
+            "Las actualizaciones del programa solo funcionan al ejecutar "
+            "el archivo Descargador de Música.exe.")
+    try:
+        api = "https://api.github.com/repos/%s/%s/releases/latest" % (REPO_USER, REPO_NAME)
+        req = urllib.request.Request(api, headers={
+            "User-Agent": "Descargador-de-Musica/%s" % VERSION})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+        tag = str(data.get("tag_name") or "")
+        if _version_numerica(tag) <= _version_numerica(VERSION):
+            return None
+        url = None
+        for asset in data.get("assets") or []:
+            if asset.get("name") == PROGRAMA_ASSET:
+                url = asset.get("browser_download_url")
+        if not url:
+            return ("Hay una versión nueva (%s) en el repositorio, pero no "
+                    "encontré el archivo de descarga." % tag)
+        destino = os.path.join(exe_dir(), os.path.basename(sys.executable))
+        temp = destino + ".NUEVO"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Descargador-de-Musica/%s" % VERSION})
+        with urllib.request.urlopen(req, timeout=180) as r, open(temp, "wb") as f:
+            shutil.copyfileobj(r, f)
+        with open(temp, "rb") as f:
+            if f.read(2) != b"MZ":
+                os.remove(temp)
+                return "La descarga de la actualización no es un programa válido."
+        if not (5 * 1024 * 1024 <= os.path.getsize(temp)):
+            os.remove(temp)
+            return "La descarga de la actualización no tiene el tamaño esperado."
+        return tag
+    except Exception:
+        if silencioso:
+            return None
+        return ("No se pudo comprobar las actualizaciones (revisa tu "
+                "conexión a internet e inténtalo de nuevo).")
 
 
 def _run_ydl(args):
@@ -854,7 +914,7 @@ def prepare_full_preview(item, on_chunk, on_seg, on_skip, on_error, stop_event=N
 
 
 # ── Ayuda detallada (se abre con F1) ───────────────────────────
-HELP_TEXT = """Descargador de Música, versión 1.0.0 beta.
+HELP_TEXT = """Descargador de Música, versión 1.0.2.
 
 Qué hace este programa:
 Descarga música y vídeo como aplicación independiente, pensada para
@@ -995,6 +1055,21 @@ NOVEDADES_TEXT = """Novedades de esta versión.
 7. Menú con F1:
    Pulsar F1 abre un menú para elegir entre ver la Ayuda o las
    Novedades.
+
+8. Actualizaciones automáticas del programa:
+   Al abrir, el programa comprueba solo si hay una versión nueva en
+   su repositorio de GitHub y, si la hay, le avisa y se actualiza
+   solo (se cierra, se instala y vuelve a abrirse). También hay un
+   botón "Buscar actualizaciones del programa" en Más opciones.
+
+9. Cola de descargas:
+   Puede añadir los resultados que quiera a una cola con "Agregar a
+   la cola" y luego descargarlos todos seguidos con "Descargar la
+   cola", escuchando lo que ya se bajó. "Vaciar la cola" la limpia.
+
+10. Copiar enlace del resultado:
+    El botón "Copiar enlace" copia al portapapeles el enlace del
+    resultado seleccionado.
 """
 
 
@@ -1075,6 +1150,11 @@ class MoreOptionsDialog(wx.Dialog):
         sizer.Add(updBtn, 0, wx.ALL, 4)
         self.updBtn = updBtn
 
+        progBtn = wx.Button(panel, label="Buscar &actualizaciones del programa")
+        progBtn.Bind(wx.EVT_BUTTON, self._onProgramUpdate)
+        sizer.Add(progBtn, 0, wx.ALL, 4)
+        self.progBtn = progBtn
+
         btns = wx.BoxSizer(wx.HORIZONTAL)
         okBtn = wx.Button(panel, wx.ID_OK)
         cancelBtn = wx.Button(panel, wx.ID_CANCEL)
@@ -1100,6 +1180,33 @@ class MoreOptionsDialog(wx.Dialog):
     def _onUpdate(self, evt):
         self.updBtn.Disable()
         threading.Thread(target=self._update_worker, daemon=True).start()
+
+    def _onProgramUpdate(self, evt):
+        self.progBtn.Disable()
+        threading.Thread(target=self._program_update_worker, daemon=True).start()
+
+    def _program_update_worker(self):
+        nueva = descargar_actualizacion_programa(silencioso=False)
+        wx.CallAfter(self._on_program_update_done, nueva)
+
+    def _on_program_update_done(self, nueva):
+        self.progBtn.Enable()
+        if nueva and _version_numerica(nueva) > _version_numerica(VERSION):
+            wx.MessageBox(
+                "Hay una versión nueva: %s.\n\nLa actualización ya está "
+                "descargada. Pulsa Aceptar para cerrar este cuadro; la "
+                "aplicación se cerrará y se actualizará sola." % nueva,
+                "Actualizaciones", wx.OK | wx.ICON_INFORMATION, parent=self)
+            self.EndModal(wx.ID_OK)
+            parent = self.GetParent()
+            wx.CallAfter(parent._preguntar_actualizar, nueva)
+        elif not nueva:
+            wx.MessageBox("Estás en la última versión: %s. No hay "
+                          "actualizaciones." % VERSION,
+                          "Actualizaciones", wx.OK | wx.ICON_INFORMATION, parent=self)
+        else:
+            wx.MessageBox(str(nueva), "Actualizaciones",
+                          wx.OK | wx.ICON_WARNING, parent=self)
 
     def _update_worker(self):
         rc, out = actualizar_externo()
@@ -1209,6 +1316,10 @@ class MainFrame(wx.Frame):
         self._dl_ultimo_anuncio = 0.0
         self._dl_ultimo_step = -1
         self._dl_fin_guard = False
+        self._cola = []
+        self._cola_idx = 0
+        self._dl_cola_total = 0
+        self._dl_cola_activa = False
         self._active_url = ""
         self._active_playlist = False
         self._last_tipo = 0
@@ -1336,12 +1447,31 @@ class MainFrame(wx.Frame):
         self.btnDownload = wx.Button(p, label="&Descargar")
         self.btnDownload.Bind(wx.EVT_BUTTON, self._onDownload)
         self.btnDownload.Disable()
+        self.btnCopy = wx.Button(p, label="Copiar &enlace")
+        self.btnCopy.Bind(wx.EVT_BUTTON, self._onCopyLink)
+        self.btnCopy.Disable()
         newBtn = wx.Button(p, label="&Nueva búsqueda")
         newBtn.Bind(wx.EVT_BUTTON, self._onNewSearch)
         btns.Add(self.btnPlay, 0, wx.RIGHT, 8)
         btns.Add(self.btnDownload, 0, wx.RIGHT, 8)
+        btns.Add(self.btnCopy, 0, wx.RIGHT, 8)
         btns.Add(newBtn, 0, 0, 0)
         s.Add(btns, 0, wx.ALIGN_CENTER | wx.ALL, 6)
+
+        colaBtns = wx.BoxSizer(wx.HORIZONTAL)
+        self.btnCola = wx.Button(p, label="&Agregar a la cola")
+        self.btnCola.Bind(wx.EVT_BUTTON, self._onAddQueue)
+        self.btnCola.Disable()
+        self.btnDescargarCola = wx.Button(p, label="Descargar la &cola")
+        self.btnDescargarCola.Bind(wx.EVT_BUTTON, self._onDownloadQueue)
+        self.btnDescargarCola.Disable()
+        self.btnVaciaCola = wx.Button(p, label="&Vaciar la cola")
+        self.btnVaciaCola.Bind(wx.EVT_BUTTON, self._onVaciaCola)
+        self.btnVaciaCola.Disable()
+        colaBtns.Add(self.btnCola, 0, wx.RIGHT, 8)
+        colaBtns.Add(self.btnDescargarCola, 0, wx.RIGHT, 8)
+        colaBtns.Add(self.btnVaciaCola, 0, 0, 0)
+        s.Add(colaBtns, 0, wx.ALIGN_CENTER | wx.ALL, 6)
 
         s.AddStretchSpacer(1)
         p.SetSizer(s)
@@ -1515,6 +1645,13 @@ class MainFrame(wx.Frame):
             self.lstResults.SetSelection(0)
             self.btnPlay.Enable()
             self.btnDownload.Enable()
+            self.btnCopy.Enable()
+            self.btnCola.Enable()
+            self.btnCola.SetLabel("&Agregar a la cola (%d)" % len(self._cola) if self._cola
+                                  else "&Agregar a la cola")
+            if self._cola:
+                self.btnDescargarCola.Enable()
+                self.btnVaciaCola.Enable()
             wx.CallAfter(self.lstResults.SetFocus)
         else:
             self._show_search_error("No se encontraron resultados.")
@@ -1537,6 +1674,13 @@ class MainFrame(wx.Frame):
         self.lstResults.Clear()
         self.btnPlay.Disable()
         self.btnDownload.Disable()
+        self.btnCopy.Disable()
+        self.btnCola.Disable()
+        self.btnDescargarCola.Disable()
+        self.btnVaciaCola.Disable()
+        self._cola = []
+        self._cola_idx = 0
+        self._dl_cola_total = 0
         if self._preview_alias:
             mci_stop_and_close(self._preview_alias)
             self._preview_alias = None
@@ -1734,6 +1878,150 @@ class MainFrame(wx.Frame):
                       APP_NAME, wx.OK | wx.ICON_ERROR)
         self.Raise()
 
+    # ── Copiar enlace del resultado ──
+    def _onCopyLink(self, evt=None):
+        if self._busy and not self._dl_cola_activa:
+            return
+        sel = self.lstResults.GetSelection()
+        if sel == wx.NOT_FOUND or sel >= len(self.results):
+            wx.MessageBox("Primero elige un resultado de la lista.", APP_NAME,
+                          wx.OK | wx.ICON_INFORMATION)
+            return
+        url = self.results[sel].get("url", "")
+        if not url:
+            wx.MessageBox("Este resultado no tiene enlace.", APP_NAME,
+                          wx.OK | wx.ICON_INFORMATION)
+            return
+        try:
+            if wx.TheClipboard.Open():
+                wx.TheClipboard.SetData(wx.TextDataObject(url))
+                wx.TheClipboard.Close()
+                self._announce("Enlace copiado.")
+            else:
+                wx.MessageBox("No se pudo copiar el enlace.", APP_NAME,
+                              wx.OK | wx.ICON_ERROR)
+        except Exception:
+            wx.MessageBox("No se pudo copiar el enlace.", APP_NAME,
+                          wx.OK | wx.ICON_ERROR)
+
+    # ── Cola de descargas ──
+    def _onAddQueue(self, evt=None):
+        if self._dl_cola_activa:
+            return
+        sel = self.lstResults.GetSelection()
+        if sel == wx.NOT_FOUND or sel >= len(self.results):
+            wx.MessageBox("Primero elige un resultado de la lista.", APP_NAME,
+                          wx.OK | wx.ICON_INFORMATION)
+            return
+        item = self.results[sel]
+        if item.get("_bulk"):
+            wx.MessageBox("Las listas de Spotify se descargan con el botón "
+                          "Descargar.", APP_NAME, wx.OK | wx.ICON_INFORMATION)
+            return
+        self._cola.append(item)
+        n = len(self._cola)
+        self.btnCola.SetLabel("&Agregar a la cola (%d)" % n)
+        self.btnDescargarCola.Enable()
+        self.btnVaciaCola.Enable()
+        self._announce("Agregado a la cola. Tienes %d canciones en la cola." % n)
+
+    def _onVaciaCola(self, evt=None):
+        if self._dl_cola_activa:
+            return
+        if not self._cola:
+            return
+        self._cola = []
+        self.btnDescargarCola.Disable()
+        self.btnVaciaCola.Disable()
+        self.btnCola.SetLabel("&Agregar a la cola")
+        self._announce("Cola vaciada.")
+
+    def _onDownloadQueue(self, evt=None):
+        if self._busy or self._dl_cola_activa or not self._cola:
+            return
+        self._cola_idx = 0
+        self._dl_cola_total = len(self._cola)
+        self._dl_cola_activa = True
+        self._busy = True
+        self.btnPlay.Disable()
+        self.btnDownload.Disable()
+        self.btnCopy.Disable()
+        self.btnCola.Disable()
+        self.btnDescargarCola.Disable()
+        self.btnVaciaCola.Disable()
+        self._dl_cancel = threading.Event()
+        self._dl_fin_guard = False
+        self._dl_ultimo_anuncio = 0.0
+        self._dl_ultimo_step = -1
+        self._dl_progress = wx.ProgressDialog(
+            "Cola de descargas", "Preparando la cola...",
+            maximum=100, style=wx.PD_CAN_ABORT | wx.PD_AUTO_HIDE)
+        self._dl_progress.Show()
+        self._announce("Descargando la cola. Primera canción...")
+        self._cola_next()
+
+    def _cola_next(self):
+        if self._dl_cancel.is_set():
+            self._terminar_cola(True, "Descarga cancelada.")
+            return
+        if self._cola_idx >= len(self._cola):
+            self._terminar_cola(False)
+            return
+        item = self._cola[self._cola_idx]
+        cfg = dict(self.cfg)
+        self._dl_titulo = item["title"]
+        self._annunciar_progreso("Canción %d de %d." % (
+            self._cola_idx + 1, self._dl_cola_total))
+        def on_percent(pct):
+            wx.CallAfter(self._on_dl_percent, pct)
+        def on_done(error):
+            wx.CallAfter(self._on_cola_item_done, error)
+        run_download(item, cfg, False, "", False, "",
+                     on_percent, on_done, self._dl_cancel)
+
+    def _on_cola_item_done(self, error):
+        if self._dl_fin_guard:
+            return
+        if error:
+            self._dl_fin_guard = True
+            self._terminar_cola(True, error)
+            return
+        self._cola_idx += 1
+        if self._cola_idx < self._dl_cola_total:
+            self._cola_next()
+        else:
+            self._dl_fin_guard = True
+            self._terminar_cola(False)
+
+    def _terminar_cola(self, cancelada, error=None):
+        if self._dl_progress:
+            try:
+                self._dl_progress.Destroy()
+            except Exception:
+                pass
+            self._dl_progress = None
+        self._dl_cola_activa = False
+        self._busy = False
+        self.btnPlay.Enable()
+        self.btnDownload.Enable()
+        self.btnCopy.Enable()
+        self.btnCola.Enable()
+        self.btnCola.SetLabel("&Agregar a la cola (%d)" % len(self._cola)
+                              if self._cola else "&Agregar a la cola")
+        if self._cola:
+            self.btnDescargarCola.Enable()
+            self.btnVaciaCola.Enable()
+        if cancelada:
+            wx.MessageBox("No se pudo descargar: %s"
+                          % traducir_ytdlp(error or "Descarga cancelada.",
+                                           self.cfg.get("espanol", True)),
+                          APP_NAME, wx.OK | wx.ICON_ERROR)
+        else:
+            wx.MessageBox("Cola terminada. %d canciones descargadas."
+                          % self._dl_cola_total,
+                          APP_NAME, wx.OK | wx.ICON_INFORMATION)
+        self.Raise()
+
     # ── Descargar ──
     def _onDownload(self, evt=None):
         if self._busy or not self.results:
@@ -1891,7 +2179,7 @@ class MainFrame(wx.Frame):
             save_config(self.cfg)
         dlg.Destroy()
 
-    # ── Comprobación automática de yt-dlp al abrir ──
+    # ── Comprobación automática de actualizaciones al abrir ──
     def _start_auto_update(self):
         def work():
             try:
@@ -1902,10 +2190,86 @@ class MainFrame(wx.Frame):
             time.sleep(6)
             if not self:
                 return
+            self._mostrar_actualizado()
             rc, out = actualizar_externo()
             wx.CallAfter(self._show_auto_update, out, rc)
+            nueva = descargar_actualizacion_programa()
+            if nueva:
+                wx.CallAfter(self._preguntar_actualizar, nueva)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _mostrar_actualizado(self):
+        if not getattr(sys, "frozen", False):
+            return
+        try:
+            if self.IsBeingDeleted() or not self.IsShown():
+                return
+        except Exception:
+            return
+        dir_actual = exe_dir()
+        try:
+            entradas = os.listdir(dir_actual)
+        except Exception:
+            return
+        marcas = [e for e in entradas if e.startswith(".actualizada.")]
+        if not marcas:
+            return
+        try:
+            version = marcas[-1][len(".actualizada."):]
+            os.remove(os.path.join(dir_actual, marcas[-1]))
+        except Exception:
+            return
+        wx.MessageBox("El Descargador de Música se actualizó a la versión %s." % version,
+                      APP_NAME, wx.OK | wx.ICON_INFORMATION)
+        self.Raise()
+
+    def _preguntar_actualizar(self, tag):
+        try:
+            if self.IsBeingDeleted() or not self.IsShown():
+                return
+        except Exception:
+            return
+        destino = os.path.join(exe_dir(), os.path.basename(sys.executable))
+        if getattr(sys, "frozen", False) and os.path.exists(destino + ".NUEVO"):
+            r = wx.MessageBox(
+                "Hay una versión nueva: %s.\n\nLa actualización ya está "
+                "descargada. Pulsa Aceptar para cerrar la aplicación; se "
+                "instalará y volverá a abrirse sola." % tag,
+                APP_NAME, wx.OK | wx.CANCEL)
+            if r == wx.OK:
+                self._aplicar_actualizacion()
+
+    def _aplicar_actualizacion(self):
+        try:
+            if self.IsBeingDeleted():
+                return
+        except Exception:
+            return
+        destino = os.path.join(exe_dir(), os.path.basename(sys.executable))
+        nuevo = destino + ".NUEVO"
+        if not (getattr(sys, "frozen", False) and os.path.exists(nuevo)):
+            return
+        try:
+            marca = os.path.join(exe_dir(), ".actualizada." + VERSION)
+            with open(marca, "w"):
+                pass
+        except Exception:
+            pass
+        cmd = 'timeout /t 5 /nobreak > nul & move /y "{n}" "{d}" & start "" "{d}"'.format(
+            n=nuevo, d=destino)
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            subprocess.Popen("cmd.exe /c " + cmd,
+                             creationflags=creationflags, close_fds=True)
+        except Exception:
+            try:
+                os.remove(nuevo)
+            except Exception:
+                pass
+            return
+        self.Destroy()
+        os._exit(0)
 
     def _show_auto_update(self, out, rc):
         if self._auto_check_done:
@@ -1928,6 +2292,20 @@ def main():
     app = App(False)
     frame = MainFrame()
     frame.Show()
+    if os.environ.get("DESCARGADOR_SELFTEST") == "1":
+        log = os.path.join(exe_dir(), "selftest.txt")
+        def run():
+            try:
+                silen = descargar_actualizacion_programa()
+                expl = descargar_actualizacion_programa(silencioso=False)
+                with io.open(log, "w", encoding="utf-8") as f:
+                    f.write("VERSION=%s\nfrozen=%r\nresultado_arranque=%r\nresultado_explicito=%r\n" % (
+                        VERSION, getattr(sys, "frozen", False), silen, expl))
+            except Exception as e:
+                with io.open(log, "w", encoding="utf-8") as f:
+                    f.write("ERROR=%r" % (e,))
+            app.ExitMainLoop()
+        wx.CallLater(800, run)
     app.MainLoop()
 
 
