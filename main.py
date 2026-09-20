@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Descargador de Música — versión 1.0.2.
+"""Descargador de Música — versión 1.0.3.
 
 Aplicación independiente (no complemento de NVDA), accesible con NVDA.
 Busca canciones en YouTube, acepta URL (canción o playlist), reproduce
@@ -24,7 +24,7 @@ import urllib.request
 import wx
 
 APP_NAME = "Descargador de Música"
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 SEARCH_LIMIT = 10
 REPO_USER = "elgamer780"
 REPO_NAME = "descargador-de-musica"
@@ -914,7 +914,7 @@ def prepare_full_preview(item, on_chunk, on_seg, on_skip, on_error, stop_event=N
 
 
 # ── Ayuda detallada (se abre con F1) ───────────────────────────
-HELP_TEXT = """Descargador de Música, versión 1.0.2.
+HELP_TEXT = """Descargador de Música, versión 1.0.3.
 
 Qué hace este programa:
 Descarga música y vídeo como aplicación independiente, pensada para
@@ -978,6 +978,11 @@ Pantalla principal:
 - Botón "Salir": cierra la aplicación.
 - F1 abre un menú donde eliges ver la Ayuda o las Novedades.
 
+Atajos de teclado:
+- Ctrl+D: descarga la canción seleccionada (abre la ventana para elegir
+  entre audio o vídeo, formato y calidad).
+- Ctrl+U: copia al portapapeles la URL de la canción seleccionada.
+
 Volumen:
 El deslizador de volumen está en "Más opciones". Súbelo o bájalo
 para que la música no suene más fuerte que el lector de pantalla.
@@ -1017,59 +1022,19 @@ avisos breves que no necesitan acción, como "Buscando" o
 cuadro en pantalla.
 """
 
-NOVEDADES_TEXT = """Novedades de esta versión.
+NOVEDADES_TEXT = """Novedades de esta versión (1.0.3).
 
-1. La canción completa suena sin cortes:
-   Ya no se detiene a los pocos segundos. Reproduce el principio casi
-   al instante y va uniendo trozos mientras baja, hasta que pulses
-   Detener o termine la canción. Si un trozo llega tarde, se salta
-   para que no se quede detenida en mitad.
+1. Atajos de teclado:
+   - Ctrl+D: descarga la canción seleccionada. Abre la ventana para
+     elegir entre audio o vídeo, formato y calidad.
+   - Ctrl+U: copia al portapapeles la URL de la canción
+     seleccionada.
 
-2. Spotify integrado:
-   - Enlace de una canción individual: se busca la misma canción en
-     YouTube para escucharla y descargarla.
-   - Enlace de un álbum o lista: se descargan todas sus canciones con
-     la librería de Spotify integrada (necesita las claves gratuitas
-     del archivo spotify.txt, explicado en la Ayuda con F1).
+2. El programa sigue comprobando solo las actualizaciones y, si hay
+   una versión nueva, se actualiza solo. También puedes pulsar
+   "Buscar actualizaciones del programa" en Más opciones.
 
-3. Facebook y otros sitios:
-   Al pegar la URL, se descarga directamente. También los sitios para
-   mayores de 18; y si piden iniciar sesión, con un cookies.txt junto
-   al programa se desbloquean.
-
-4. Mensajes de descarga:
-   Al descargar se ve "Descargando" con el nombre de la canción y la
-   música sigue sonando. Al terminar dice "La canción fue descargada
-   con éxito" y muestra la carpeta.
-
-5. Sin cuadros que pidan Enter:
-   Los avisos de yt-dlp que pedían pulsar una tecla ya no se muestran
-   en pantalla. Los breves como "Buscando" o "Cargando" solo los dice
-   el lector, sin cuadros visibles.
-
-6. Actualización de yt-dlp más segura:
-   Se comprueba en silencio al abrir el programa y solo avisa cuando
-   se instala una versión nueva. Ya no deja el descargador en mal
-   estado si el proceso falla.
-
-7. Menú con F1:
-   Pulsar F1 abre un menú para elegir entre ver la Ayuda o las
-   Novedades.
-
-8. Actualizaciones automáticas del programa:
-   Al abrir, el programa comprueba solo si hay una versión nueva en
-   su repositorio de GitHub y, si la hay, le avisa y se actualiza
-   solo (se cierra, se instala y vuelve a abrirse). También hay un
-   botón "Buscar actualizaciones del programa" en Más opciones.
-
-9. Cola de descargas:
-   Puede añadir los resultados que quiera a una cola con "Agregar a
-   la cola" y luego descargarlos todos seguidos con "Descargar la
-   cola", escuchando lo que ya se bajó. "Vaciar la cola" la limpia.
-
-10. Copiar enlace del resultado:
-    El botón "Copiar enlace" copia al portapapeles el enlace del
-    resultado seleccionado.
+Pulsa F1 en cualquier momento para ver la Ayuda o estas Novedades.
 """
 
 
@@ -1477,11 +1442,19 @@ class MainFrame(wx.Frame):
         p.SetSizer(s)
         self.book.AddPage(p, "Resultados")
 
-    # ── evento global F1 ──
+    # ── atajos de teclado (F1, Ctrl+D, Ctrl+U) ──
     def _onKey(self, evt):
-        if evt.GetKeyCode() == wx.WXK_F1:
+        kc = evt.GetKeyCode()
+        if kc == wx.WXK_F1:
             self._onHelp()
             return
+        if evt.ControlDown() and not evt.AltDown():
+            if kc == ord('D') or evt.GetUnicodeKey() in (ord('d'), ord('D')):
+                self._onDownload()
+                return
+            if kc == ord('U') or evt.GetUnicodeKey() in (ord('u'), ord('U')):
+                self._onCopyLink()
+                return
         evt.Skip()
 
     def _onHelp(self, evt=None):
